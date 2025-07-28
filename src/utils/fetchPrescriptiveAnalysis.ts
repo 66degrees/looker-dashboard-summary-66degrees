@@ -10,7 +10,7 @@ export const fetchPrescriptiveAnalysis = async (
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        query: userQuestion,
+        queryQuestions: userQuestion,
         client_secret: restfulService === 'http://localhost:5000' ? process.env.GENAI_CLIENT_SECRET : extensionSDK.createSecretKeyTag("genai_client_secret")
       })
     });
