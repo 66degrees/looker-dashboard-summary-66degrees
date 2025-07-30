@@ -75,6 +75,7 @@ const generativeModel = vertexAI.getGenerativeModel({
 app.post('/generateQuerySummary', verifyClientSecret, async (req, res) => {
     const { query, description, nextStepsInstructions } = req.body; // Update to receive query and description
     try {
+        console.log("testing console")
         // Replace this with your Vertex AI summarization logic
         const summary = await generateQuerySummary(generativeModel, query, description, nextStepsInstructions);
         res.json({ summary });
