@@ -30,10 +30,11 @@ const cors = require('cors')
 const http = require('http');
 const server = http.createServer(app);
 const { Server } = require('socket.io')
-const {VertexAI} = require('@google-cloud/vertexai');
+const { VertexAI } = require('@google-cloud/vertexai');
 const dotenv = require('dotenv');
 const fs = require('fs');
 const path = require('path');
+const { queryData } = require('./config.js');
 dotenv.config();
 
 const storedClientSecret = process.env.GENAI_CLIENT_SECRET
@@ -43,7 +44,7 @@ app.use(cors())
 
 const writeStructuredLog = (message) => {
     // Complete a structured log entry.
-   return {
+    return {
         severity: 'INFO',
         message: message,
         // Log viewer accesses 'component' as 'jsonPayload.component'.
@@ -65,11 +66,29 @@ const verifyClientSecret = (req, res, next) => {
 
 
 // Initialize Vertex with your Cloud project and location
-const vertexAI = new VertexAI({project: process.env.PROJECT, location: process.env.REGION});
+const vertexAI = new VertexAI({ project: process.env.PROJECT, location: process.env.REGION });
 // Instantiate the model
 const generativeModel = vertexAI.getGenerativeModel({
     model: 'gemini-1.5-flash',
-    generationConfig: {maxOutputTokens: 2500, temperature: 0.4, candidateCount: 1}
+    generationConfig: { maxOutputTokens: 2500, temperature: 0.4, candidateCount: 1 }
+});
+app.post('/generatePerspectiveAnalytics', async (req, res) => {
+
+    try {
+        console.log('Generating perspective analytics', req.body);
+        const { queryQuestions } = req.body;
+        // Generate query suggestions
+        const suggestions = await generatePerspectiveAnalytics(queryQuestions);
+        console.log('Perspective Analytics Suggestions: ', suggestions);
+        res.json({ suggestions }); // Correct the response key to suggestions
+    } catch (e) {
+        console.log('There was an error processing the query suggestions: ', e);
+        res.status(500).send('Internal Server Error');
+    }
+});
+
+app.get('/health', (req, res) => {
+    res.status(200).send('Application is healthy');
 });
 app.post('/generateQuerySummary', verifyClientSecret, async (req, res) => {
     const { query, description, nextStepsInstructions } = req.body; // Update to receive query and description
@@ -109,7 +128,7 @@ app.post('/generateQuerySuggestions', verifyClientSecret, async (req, res) => {
 // for the individual query summary:
 async function generateQuerySummary(generativeModel, query, description, nextStepsInstructions) {
     const context = `
-    Summary style/specialized instructions: ${ nextStepsInstructions || ''}
+    Summary style/specialized instructions: ${nextStepsInstructions || ''}
     Dashboard Detail: ${description || ''} \n
     Query Details:  "Query Title: ${query.title} \n ${query.note_text !== '' || query.note_text !== null ? "Query Note: " + query.note_text : ''} \n Query Fields: ${query.queryBody.fields} \n Query Data: ${JSON.stringify(query.queryData)} \n"
     `;
@@ -127,7 +146,7 @@ async function generateQuerySummary(generativeModel, query, description, nextSte
         * `Description`: A concise (2-4 sentences) paragraph describing the query.
         * `> Summary`: A blockquote (3-5 sentences) summarizing the query results for user comprehension.
         * `## Next Steps`: A bulleted list of 2-3 actionable next steps based on the query summary.
-    * **Newlines and Dividers:** Each query summary must start on a new line and end with a horizontal divider (`---`).
+    * **Newlines and Dividers:** Each query summary must start on a new line and end with a horizontal divider (`-- - `).
 
     **Context:**
     
@@ -154,7 +173,7 @@ async function generateQuerySummary(generativeModel, query, description, nextSte
     const prompt = {
         contents: [
             {
-                role: 'user', parts:[
+                role: 'user', parts: [
                     {
                         text: queryPrompt
                     }
@@ -226,14 +245,14 @@ async function generateQuerySuggestions(generativeModel, queryResults, querySumm
 
     * **Actionable and Looker-Executable:** Queries must be feasible within the Looker platform.
     * **Targeted Investigation:** Queries should build upon the provided queryResults and querySummaries, avoiding repetition of existing analyses.
-    * **Alignment with Next Steps:** Queries must directly relate to the analytical "next steps" outlined in `${nextStepsInstructions}` and the context provided within `${querySummaries}`.
+    * **Alignment with Next Steps:** Queries must directly relate to the analytical "next steps" outlined in `${ nextStepsInstructions }` and the context provided within `${ querySummaries } `.
     * **Date Filtering:** Include a date filter in every query. If a relevant date range isn't specified in the context, default to the "last 30 days."
 
     Here's the data context:
 
-    * **Current Data:** `${queryResults}`
-    * **Previous Analysis and Next Steps:** `${querySummaries}`
-    * **Next Step Instructions:** `${nextStepsInstructions}`
+    * **Current Data:** `${ queryResults } `
+    * **Previous Analysis and Next Steps:** `${ querySummaries } `
+    * **Next Step Instructions:** `${ nextStepsInstructions } `
 
     Output Format:
 
@@ -255,6 +274,61 @@ async function generateQuerySuggestions(generativeModel, queryResults, querySumm
 
     const querySuggestionsResp = await generativeModel.generateContent(querySuggestionsPrompt);
     return querySuggestionsResp.response.candidates[0].content.parts[0].text;
+}
+
+async function generatePerspectiveAnalytics(queryQuestions) {
+    try {
+
+        const weightData = await queryData(); // Call the function to query data from BigQuery
+
+        const weightHash = {}
+        weightData.forEach((data) => {
+            weightHash[data.processed_input] = data.weight;
+        });
+
+        const userQuestions = queryQuestions ? queryQuestions : `User's question:
+        'What will be the impact on medv if rm increases by 2 units?'
+        Instructions:
+        - Each key represents a feature (e.g., 'rm', 'lstat'), and its corresponding value is the model's learned coefficient (weight).
+        - The model predicts medv (median house value). The prediction is a linear combination of features:
+        medv = sum(weight_i * feature_i) + intercept
+        - When a user asks: 'What happens if [feature] increases/decreases by [X]?', calculate the impact as:
+        Impact = X * weight
+        - If a user asks for feature importance or driver analysis:
+        - Rank features by absolute value of their weights.
+        - Explain how each feature influences medv (positive/negative).
+        - If the user asks 'How can I increase medv by Y?', suggest feature changes based on inverse weight logic.
+        - Include numbers in the answer, especially when simulating changes.
+        - Respond in a strategic tone suitable for business decision-makers.
+        - If the intercept is present (e.g., '_INTERCEPT_': 36.77), you may include it when explaining the full model.
+        Example queries to handle:
+        - 'How does a 1 unit increase in rm affect medv?'
+        - 'What features are most important in predicting medv?'
+        - 'What if lstat drops by 2 units?'
+        - 'How can we increase medv by 5 points?'
+        Always aim to give clear, actionable insights grounded in the model weights provided."""
+    `;
+
+        const file_content = `
+                """You are a prescriptive analytics expert. Use the following regression model output to answer business questions.
+            Here is the JSON of the linear regression model weights from BQML:
+            ${JSON.stringify(weightHash, null, 2)}
+            ${userQuestions}
+    `;
+        const perspectivePrompt = {
+            contents: [{ role: 'user', parts: [{ text: file_content }] }]
+        };
+
+        console.log("********** Generating Perspective Analytics **********");
+        const perspectiveResp = await generativeModel.generateContent(perspectivePrompt)
+        console.log('Perspective Response ******************');
+        console.log('Perspective Response: ', perspectiveResp.response.candidates[0].content.parts[0].text);
+        return perspectiveResp.response.candidates[0].content.parts[0].text;
+    }
+    catch (error) {
+        console.error('Error generating perspective analytics:', error);
+        throw error; // Re-throw the error to be handled by the caller
+    }
 }
 
 
